@@ -10,21 +10,21 @@ DeepECT simultaneously learns a feature representation for a dataset and a hiera
 
 This implementation provides a clean, modular, and easy-to-use version of the DeepECT algorithm. It is built entirely in Python using PyTorch.
 
-*   **Modular Design:** The code is structured into `TreeNode` and `DeepECT` classes, making it easy to understand and extend.
-*   **Full Loss Function:** Implements the complete three-part loss function described in the paper:
-    1.  **Reconstruction Loss (`L_rec`)**: Ensures the embedding preserves essential information from the original data.
-    2.  **Node Center Loss (`L_nc`)**: Pulls leaf node centers towards the mean of their assigned data points.
-    3.  **Node Data Compression Loss (`L_dc`)**: A novel projection-based loss that enhances cluster separation while preserving orthogonal structural information.
-*   **Dynamic Tree Management:** Includes the core logic for dynamically growing the tree by splitting high-variance nodes and pruning "dead" nodes with low weights.
-*   **Utilities:** Provides convenient methods for training (`train`), prediction (`predict`), and model persistence (`save_model`, `load_model`).
-*   **Manual Pruning:** An additional utility method `prune_subtree` is included to manually prune the tree at a specified node, allowing for interactive exploration of the hierarchy.
+* **Modular Design:** The code is structured into `TreeNode` and `DeepECT` classes, making it easy to understand and extend.
+* **Full Loss Function:** Implements the complete three-part loss function described in the paper:
+  1. **Reconstruction Loss (`L_rec`)**: Ensures the embedding preserves essential information from the original data.
+  2. **Node Center Loss (`L_nc`)**: Pulls leaf node centers towards the mean of their assigned data points.
+  3. **Node Data Compression Loss (`L_dc`)**: A novel projection-based loss that enhances cluster separation while preserving orthogonal structural information.
+* **Dynamic Tree Management:** Includes the core logic for dynamically growing the tree by splitting high-variance nodes and pruning "dead" nodes with low weights.
+* **Utilities:** Provides convenient methods for training (`train`), prediction (`predict`), and model persistence (`save_model`, `load_model`).
+* **Manual Pruning:** An additional utility method `prune_subtree` is included to manually prune the tree at a specified node, allowing for interactive exploration of the hierarchy.
 
 ## Key Features of DeepECT
 
--   **Hierarchical Clustering:** Instead of a flat set of clusters, DeepECT builds a binary tree that represents a hierarchy of clusters, capturing relationships between populations and subpopulations.
--   **Dynamic Tree Structure:** The tree is not fixed. It grows and prunes itself automatically during training to adapt to the structure of the data in the learned embedding space.
--   **No Pre-specified Number of Clusters (k):** Unlike most deep clustering methods (e.g., DEC, IDEC), you don't need to know the number of clusters in advance. You only set a maximum number of leaves as a stopping condition.
--   **Simultaneous Learning:** The embedding model (e.g., an Autoencoder) and the cluster tree are optimized jointly, allowing them to improve each other iteratively.
+- **Hierarchical Clustering:** Instead of a flat set of clusters, DeepECT builds a binary tree that represents a hierarchy of clusters, capturing relationships between populations and subpopulations.
+- **Dynamic Tree Structure:** The tree is not fixed. It grows and prunes itself automatically during training to adapt to the structure of the data in the learned embedding space.
+- **No Pre-specified Number of Clusters (k):** Unlike most deep clustering methods (e.g., DEC, IDEC), you don't need to know the number of clusters in advance. You only set a maximum number of leaves as a stopping condition.
+- **Simultaneous Learning:** The embedding model (e.g., an Autoencoder) and the cluster tree are optimized jointly, allowing them to improve each other iteratively.
 
 ## Citation and License
 
@@ -50,24 +50,26 @@ The original paper is distributed under the Creative Commons Attribution 4.0 Int
 
 The necessary libraries are listed in `requirements.txt`.
 
--   Python 3.8+
--   PyTorch
--   scikit-learn
--   NumPy
--   tqdm
+- Python 3.8+
+- PyTorch
+- scikit-learn
+- NumPy
+- tqdm
 
 ## Installation
 
-1.  Clone the repository:
-    ```bash
-    git clone https://github.com/your-username/DeepECT-PyTorch.git
-    cd DeepECT-PyTorch
-    ```
+1. Clone the repository:
 
-2.  Install the required packages:
-    ```bash
-    pip install -r requirements.txt
-    ```
+   ```bash
+   git clone https://github.com/u2er/DeepECT.git
+   cd DeepECT
+   ```
+
+2. Install the required packages:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 ## Usage Example
 
