@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from sklearn.cluster import KMeans
 
-from typing import Union, Tuple, Callable, Iterable, Dict, Any
+from typing import Union, Tuple, Callable, Iterable, Dict, List, Any
 
 
 class TreeNode:
@@ -257,7 +257,7 @@ class DeepECT(nn.Module):
         # Loss 1: Reconstruction Loss (L_REC)
         # This ensures the embedding retains information from the original data.
         loss_rec = self.embedding_model_loss(x_hat, x)
-        if isinstance(loss_rec, tuple):
+        if isinstance(loss_rec, (Tuple, List)):
             loss_rec, *_ = loss_rec
 
         if not self.leaf_nodes:

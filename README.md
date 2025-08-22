@@ -78,7 +78,7 @@ Here is a simple example of how to use the `DeepECT` model on synthetic data.
 ```python
 import torch
 import torch.nn as nn
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import Dataset, DataLoader
 from sklearn.datasets import make_blobs
 
 # Assuming dect.py is in the same directory
@@ -109,8 +109,21 @@ class Autoencoder(nn.Module):
 X, y = make_blobs(n_samples=1500, centers=4, n_features=20, cluster_std=1.5, random_state=42)
 X = torch.tensor(X, dtype=torch.float32)
 
+
+# Example of Dataset for DECT
+class ClusteringDataset(Dataset):
+    def __init__(self, data):
+        self.data = data
+
+    def __len__(self):
+        return self.data.shape[0]
+    
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+
 # Create a DataLoader
-dataset = TensorDataset(X)
+dataset = ClusteringDataset(X)
 dataloader = DataLoader(dataset, batch_size=256, shuffle=True)
 # For prediction, we use the full dataset
 fulldataloader = DataLoader(dataset, batch_size=512)
