@@ -64,6 +64,8 @@ class JsonlEmbeddingDataset(Dataset):
         self.embeddings: List[List[float]] = []
 
         with self.jsonl_path.open('r', encoding='utf-8') as f:
+            for line_number, line in enumerate(f, start=1):
+                print(f"正在读取第{line_number}行数据")
             for line in f:
                 line = line.strip()
                 if not line:
@@ -136,6 +138,15 @@ if indices:
     print(f"First 5 assignments with indices: {paired[:5]}")
 else:
     print(f"First 10 assignments: {assignments[:10]}")
+
+PREDICTIONS_PATH = Path("usage_examples/predicted_clusters.jsonl")
+print(f"Saving predictions to {PREDICTIONS_PATH}...")
+PREDICTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+with PREDICTIONS_PATH.open('w', encoding='utf-8') as f:
+    for sample_idx, cluster_id in zip(indices, assignments.tolist()):
+        record = {"idx": sample_idx, "cluster": int(cluster_id)}
+        f.write(json.dumps(record, ensure_ascii=False) + '\n')
+print("Predictions saved.")
 
 # 6. Save and Load the Model
 MODEL_PATH = "dect_model.pth"
