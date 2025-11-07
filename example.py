@@ -66,6 +66,7 @@ class JsonlEmbeddingDataset(Dataset):
         with self.jsonl_path.open('r', encoding='utf-8') as f:
             for line_number, line in enumerate(f, start=1):
                 print(f"正在读取第{line_number}行数据")
+            for line in f:
                 line = line.strip()
                 if not line:
                     continue
