@@ -56,13 +56,32 @@ class TreeNode:
         return f'Node(id={self.id}, leaf={self.is_leaf}, weight={self.weight:.2f})'
 
 
+def cosine_distance_loss(input_tensor: torch.Tensor, target_tensor: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Computes cosine-distance loss (1 - cosine similarity) between tensors."""
+    if input_tensor.dim() == 1:
+        input_tensor = input_tensor.unsqueeze(0)
+    if target_tensor.dim() == 1:
+        target_tensor = target_tensor.unsqueeze(0)
+
+    if input_tensor.shape != target_tensor.shape:
+        if target_tensor.size(0) == 1:
+            target_tensor = target_tensor.expand(input_tensor.size(0), *target_tensor.shape[1:])
+        elif input_tensor.size(0) == 1:
+            input_tensor = input_tensor.expand(target_tensor.size(0), *input_tensor.shape[1:])
+        else:
+            raise ValueError("Input and target shapes are incompatible for cosine distance loss.")
+
+    cosine_sim = F.cosine_similarity(input_tensor, target_tensor, dim=-1, eps=eps)
+    return (1 - cosine_sim).mean()
+
+
 class DeepECT(nn.Module):
     """
     Deep Embedded Clustering Tree (DeepECT) model.
     This model combines a deep embedding model (like an autoencoder) with a dynamically
     growing and pruning binary tree structure for hierarchical clustering.
     """
-    def __init__(self, embedding_model: nn.Module, latent_dim: int, embedding_model_loss: Callable = F.mse_loss, device: torch.device = 'cpu') -> None:
+    def __init__(self, embedding_model: nn.Module, latent_dim: int, embedding_model_loss: Callable = cosine_distance_loss, device: torch.device = 'cpu') -> None:
         super().__init__()
         self.embedding_model = embedding_model.to(device)
         self.embedding_model_loss = embedding_model_loss
@@ -320,8 +339,8 @@ class DeepECT(nn.Module):
         for i, leaf in enumerate(self.leaf_nodes):
             assigned_indices = (leaf_assignments == i).nonzero(as_tuple=True)[0]
             if len(assigned_indices) > 0:
-                mean_z = z[assigned_indices].mean(dim=0).detach() 
-                loss_nc += F.mse_loss(leaf.center, mean_z)
+                mean_z = z[assigned_indices].mean(dim=0).detach()
+                loss_nc += cosine_distance_loss(leaf.center, mean_z)
                 num_leaves_with_data += 1
         if num_leaves_with_data > 0:
             loss_nc /= num_leaves_with_data
@@ -349,7 +368,7 @@ class DeepECT(nn.Module):
             direction = node.center - sibling.center
             norm = torch.norm(direction)
             if norm > 1e-8:
-                 projection_vectors[node.id] = direction / norm
+                projection_vectors[node.id] = direction / norm
 
         # Map each data point to all its ancestor nodes in the tree
         points_assigned_to_internal_nodes = collections.defaultdict(list)
@@ -364,10 +383,10 @@ class DeepECT(nn.Module):
             if node.id in points_assigned_to_internal_nodes and node.id in projection_vectors:
                 assigned_z_for_node = z[points_assigned_to_internal_nodes[node.id]]
                 projection_vector = projection_vectors[node.id]
-                
-                # Project the difference vector onto the separation vector
-                projected_dist = (assigned_z_for_node - node.center.detach()) @ projection_vector
-                loss_dc += torch.abs(projected_dist).mean()
+
+                # Align projected vectors using cosine distance for direction consistency
+                diff = assigned_z_for_node - node.center.detach()
+                loss_dc += cosine_distance_loss(diff, projection_vector.unsqueeze(0))
                 num_nodes_for_dc += 1
         if num_nodes_for_dc > 0:
             loss_dc /= num_nodes_for_dc
@@ -383,21 +402,30 @@ class DeepECT(nn.Module):
 
         return total_loss, loss_rec, loss_nc, loss_dc
 
-    def train(self, dataloader: Iterable, iterations: int, lr: float, max_leaves: int, split_interval: int, 
-              pruning_threshold: float, split_count_per_growth: Union[int, float] = 1):
+    def train(self, dataloader: Iterable, iterations: int, lr: float, max_leaves: int, split_interval: int,
+              pruning_threshold: float, split_count_per_growth: Union[int, float] = 1,
+              lr_decay_step: int = 100, lr_decay_gamma: float = 0.95) -> Dict[str, List[float]]:
         """
         The main training loop for the DeepECT model.
 
         Args:
             dataloader: The data loader for training.
             iterations (int): The total number of training iterations.
-            lr (float): The learning rate for the optimizer.
+            lr (float): The initial learning rate for the optimizer.
             max_leaves (int): The maximum number of leaf nodes in the tree.
             split_interval (int): The number of iterations between tree growing procedures.
             pruning_threshold (float): The weight threshold for pruning dead nodes.
             split_count_per_growth (int or float): The number or fraction of nodes to split during each growth phase.
+            lr_decay_step (int): Number of iterations between StepLR updates.
+            lr_decay_gamma (float): Multiplicative factor of learning rate decay.
+
+        Returns:
+            Dict[str, List[float]]: History of the total loss and its components collected at each iteration.
         """
         # Helper to re-create the optimizer when tree structure changes
+        if lr_decay_step <= 0:
+            raise ValueError("lr_decay_step must be a positive integer.")
+
         def create_optimizer(tree_params):
             if tree_params:
                 return optim.Adam([
@@ -408,9 +436,17 @@ class DeepECT(nn.Module):
                 return optim.Adam(self.embedding_model.parameters(), lr=lr)
 
         optimizer = create_optimizer(self.get_tree_parameters())
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=lr_decay_step, gamma=lr_decay_gamma)
         bar = tqdm(range(iterations))
         data_iterator = iter(dataloader)
         iteration = 0
+
+        loss_history: Dict[str, List[float]] = {
+            'total': [],
+            'reconstruction': [],
+            'node_center': [],
+            'node_compression': []
+        }
 
         while iteration < iterations:
             try:
@@ -436,22 +472,33 @@ class DeepECT(nn.Module):
             # If tree structure changed, we need a new optimizer for the new set of parameters
             if structure_changed:
                 optimizer = create_optimizer(self.get_tree_parameters())
+                scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=lr_decay_step, gamma=lr_decay_gamma)
 
             # Standard training step
             optimizer.zero_grad()
             loss, l_rec, l_nc, l_dc = self(data)
             loss.backward()
             optimizer.step()
-            
+            scheduler.step()
+
+            loss_history['total'].append(loss.item())
+            loss_history['reconstruction'].append(l_rec.item())
+            loss_history['node_center'].append(l_nc.item())
+            loss_history['node_compression'].append(l_dc.item())
+
             # Update progress bar
             bar.update(1)
             bar.set_description(
                 f'Iter {iteration} | '
                 f'Loss: {loss.item():.3f} | '
                 f'Rec: {l_rec.item():.3f} | NC: {l_nc.item():.3f} | DC: {l_dc.item():.3f} | '
-                f'Leaves: {len(self.leaf_nodes)}'
+                f'Leaves: {len(self.leaf_nodes)} | '
+                f'LR: {scheduler.get_last_lr()[0]:.2e}'
             )
             iteration += 1
+
+        bar.close()
+        return loss_history
     
     def predict(self, data_loader: Iterable) -> Dict[str, Any]:
         """
@@ -521,8 +568,10 @@ class DeepECT(nn.Module):
             'root_id': self.root.id if self.root else None
         }
 
+        model_to_save = self.embedding_model.module if isinstance(self.embedding_model, nn.DataParallel) else self.embedding_model
+
         state = {
-            'embedding_model_state_dict': self.embedding_model.state_dict(),
+            'embedding_model_state_dict': model_to_save.state_dict(),
             'tree_state': tree_state,
         }
         return state
@@ -547,7 +596,14 @@ class DeepECT(nn.Module):
         """
         checkpoint = torch.load(path, map_location=self.device)
 
-        self.embedding_model.load_state_dict(checkpoint['embedding_model_state_dict'])
+        target_model = self.embedding_model.module if isinstance(self.embedding_model, nn.DataParallel) else self.embedding_model
+        try:
+            target_model.load_state_dict(checkpoint['embedding_model_state_dict'])
+        except RuntimeError:
+            stripped_state = {
+                k.replace('module.', ''): v for k, v in checkpoint['embedding_model_state_dict'].items()
+            }
+            target_model.load_state_dict(stripped_state)
 
         tree_state = checkpoint['tree_state']
         if tree_state.get('root_id') is None:
