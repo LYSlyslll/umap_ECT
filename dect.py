@@ -90,6 +90,44 @@ class DeepECT(nn.Module):
                 params.append(node.center)
         return params
 
+    def _extract_batch(self, batch: Any) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """
+        Normalizes a batch coming from a DataLoader into embeddings and metadata.
+
+        Args:
+            batch: The batch returned by a PyTorch DataLoader. It can be a tensor,
+                a tuple/list (e.g., ``(embeddings, indices, ...)``), or a
+                dictionary containing an ``"embedding"`` key.
+
+        Returns:
+            Tuple[torch.Tensor, Dict[str, Any]]: The embeddings tensor and a
+                dictionary with any additional metadata (e.g., indices).
+        """
+        metadata: Dict[str, Any] = {}
+
+        if isinstance(batch, torch.Tensor):
+            embeddings = batch
+        elif isinstance(batch, (list, tuple)):
+            if len(batch) == 0:
+                raise ValueError("Received an empty batch from the dataloader.")
+            embeddings = batch[0]
+            if len(batch) >= 2:
+                metadata['idx'] = batch[1]
+            if len(batch) > 2:
+                metadata['extra'] = batch[2:]
+        elif isinstance(batch, dict):
+            if 'embedding' not in batch:
+                raise ValueError("Dictionary batches must contain an 'embedding' key.")
+            embeddings = batch['embedding']
+            metadata = {k: v for k, v in batch.items() if k != 'embedding'}
+        else:
+            raise TypeError(f"Unsupported batch type: {type(batch)}")
+
+        if not isinstance(embeddings, torch.Tensor):
+            embeddings = torch.tensor(embeddings, dtype=torch.float32)
+
+        return embeddings, metadata
+
     def _find_closest_leaf(self, z: torch.Tensor) -> torch.Tensor:
         """
         Finds the closest leaf node for each vector in the batch `z`.
@@ -146,7 +184,17 @@ class DeepECT(nn.Module):
 
         with torch.no_grad():
             # Get all latent representations from the data
-            all_z = torch.cat([self.embedding_model(data.to(self.device))[0] for data in data_loader], dim=0)
+            latent_batches = []
+            for batch in data_loader:
+                embeddings, _ = self._extract_batch(batch)
+                embeddings = embeddings.to(self.device)
+                latent_batches.append(self.embedding_model(embeddings)[0])
+
+            if not latent_batches:
+                self.embedding_model.train()
+                return False
+
+            all_z = torch.cat(latent_batches, dim=0)
             assignments = self._find_closest_leaf(all_z)
 
             # Find split candidates based on intra-cluster variance
@@ -366,12 +414,13 @@ class DeepECT(nn.Module):
 
         while iteration < iterations:
             try:
-                data = next(data_iterator)
+                batch = next(data_iterator)
             except StopIteration:
                 data_iterator = iter(dataloader)
-                data = next(data_iterator)
+                batch = next(data_iterator)
 
             super().train()
+            data, _ = self._extract_batch(batch)
             data = data.to(self.device)
             structure_changed = False
 
@@ -404,7 +453,7 @@ class DeepECT(nn.Module):
             )
             iteration += 1
     
-    def predict(self, data_loader: Iterable) -> torch.Tensor:
+    def predict(self, data_loader: Iterable) -> Dict[str, Any]:
         """
         Assigns each data point from the data loader to a cluster (leaf node).
 
@@ -412,20 +461,39 @@ class DeepECT(nn.Module):
             data_loader: The data loader containing the data to predict on.
 
         Returns:
-            torch.Tensor: A tensor of cluster assignments for the entire dataset.
+            Dict[str, Any]: A dictionary containing the assignments tensor under
+                the key ``"assignments"``. If the provided dataloader yields
+                sample indices (under the ``"idx"`` key or as the second
+                element of a tuple), they are returned under the key ``"idx"``
+                in the same order as ``"assignments"``.
         """
         self.embedding_model.eval()
-        with torch.no_grad():            
+        with torch.no_grad():
             all_z = []
-            for data in tqdm(data_loader, desc="Predicting"):
+            all_indices: List[Any] = []
+            for batch in tqdm(data_loader, desc="Predicting"):
+                data, metadata = self._extract_batch(batch)
                 data = data.to(self.device)
                 z, _ = self.embedding_model(data)
                 all_z.append(z)
 
+                idx_values = metadata.get('idx')
+                if idx_values is not None:
+                    if isinstance(idx_values, torch.Tensor):
+                        all_indices.extend(idx_values.detach().cpu().tolist())
+                    elif isinstance(idx_values, (list, tuple)):
+                        all_indices.extend(list(idx_values))
+                    else:
+                        all_indices.append(idx_values)
+
             all_z = torch.cat(all_z, dim=0)
             assignments = self._find_closest_leaf(all_z)
 
-        return assignments
+        result: Dict[str, Any] = {'assignments': assignments}
+        if all_indices:
+            result['idx'] = all_indices
+
+        return result
     
     def get_state(self) -> Dict[str, Any]:
         """
