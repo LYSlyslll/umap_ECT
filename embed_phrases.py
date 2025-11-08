@@ -14,13 +14,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Generate embeddings by concatenating Sentence-BERT embeddings "
-            "of the 'phrase' and 'keywords' fields from a JSONL file."
+            "of nested 'phrase' and 'keywords' texts within each JSONL record."
         )
     )
     parser.add_argument(
         "input_file",
         type=Path,
-        help="Path to the input JSONL file. Each line must contain 'phrase' and 'keywords' fields.",
+        help=(
+            "Path to the input JSONL file. Each line must contain a 'phrase' field "
+            "whose value is a JSON string with nested 'phrase' and 'keywords' entries."
+        ),
     )
     parser.add_argument(
         "output_file",
@@ -47,6 +50,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def read_jsonl(path: Path) -> List[Tuple[str, str]]:
+    """Read nested JSON strings and extract phrase and keyword texts."""
+
     records: List[Tuple[str, str]] = []
     with path.open("r", encoding="utf-8") as infile:
         for line_number, line in enumerate(infile, start=1):
@@ -58,13 +63,38 @@ def read_jsonl(path: Path) -> List[Tuple[str, str]]:
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Invalid JSON on line {line_number}: {exc}") from exc
 
-            phrase = payload.get("phrase")
-            keywords = payload.get("keywords")
-            if not isinstance(phrase, str) or not isinstance(keywords, str):
+            phrase_raw = payload.get("phrase")
+            if not isinstance(phrase_raw, str):
                 raise ValueError(
-                    f"Line {line_number} must contain string 'phrase' and 'keywords' fields."
+                    f"Line {line_number} must contain a string 'phrase' field with nested JSON."
                 )
-            records.append((phrase, keywords))
+
+            try:
+                nested_payload = json.loads(phrase_raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Line {line_number} contains invalid nested JSON in the 'phrase' field: {exc}"
+                ) from exc
+
+            nested_phrase = nested_payload.get("phrase")
+            nested_keywords = nested_payload.get("keywords")
+
+            if not isinstance(nested_phrase, str):
+                raise ValueError(
+                    f"Nested payload on line {line_number} must contain string 'phrase'."
+                )
+
+            if (
+                not isinstance(nested_keywords, list)
+                or len(nested_keywords) != 1
+                or not isinstance(nested_keywords[0], str)
+            ):
+                raise ValueError(
+                    f"Nested payload on line {line_number} must contain 'keywords' as a list "
+                    "with a single string element."
+                )
+
+            records.append((nested_phrase, nested_keywords[0]))
     return records
 
 
