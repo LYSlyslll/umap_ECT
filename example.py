@@ -1,39 +1,16 @@
 import json
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
-import torch.nn.functional as F
+from typing import Any, List, Tuple
+
+import numpy as np
 import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from sklearn.datasets import make_blobs
+from umap import UMAP
 import matplotlib.pyplot as plt
 
 # Assuming dect.py is in the same directory
 from dect import DeepECT
-
-# 1. Define an embedding model (e.g., a simple Autoencoder)
-class Autoencoder(nn.Module):
-    def __init__(self, input_dim, latent_dim):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 512),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(512, 256),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(256, latent_dim)
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 256),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(256, 512),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(512, input_dim)
-        )
-
-    def forward(self, x):
-        z = self.encoder(x)
-        x_hat = self.decoder(z)
-        return z, x_hat
 
 # 2. Prepare Data
 # Read embeddings from a JSONL file where each line is a JSON object with
@@ -100,96 +77,6 @@ def jsonl_collate_fn(batch):
     error_types = [item[2] for item in batch]
     return embeddings, indices, error_types
 
-def cosine_distance_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Computes the mean cosine distance between prediction and target tensors."""
-    pred_norm = F.normalize(pred, p=2, dim=-1, eps=eps)
-    target_norm = F.normalize(target, p=2, dim=-1, eps=eps)
-    cosine_sim = torch.sum(pred_norm * target_norm, dim=-1)
-    return (1 - cosine_sim).mean()
-
-def pretrain_autoencoder(
-    model: nn.Module,
-    train_loader: DataLoader,
-    device: torch.device,
-    max_epochs: int = 50,
-    lr: float = 1e-3,
-    val_loader: Optional[DataLoader] = None,
-    patience: int = 5,
-    min_delta: float = 1e-4,
-) -> None:
-    """Pre-trains the autoencoder using reconstruction loss only."""
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    best_loss = float('inf')
-    epochs_without_improvement = 0
-
-    for epoch in range(1, max_epochs + 1):
-        model.train()
-        running_loss = 0.0
-        num_batches = 0
-
-        for batch in train_loader:
-            inputs = batch[0].to(device)
-            optimizer.zero_grad()
-            _, recon = model(inputs)
-            loss = cosine_distance_loss(recon, inputs)
-            loss.backward()
-            optimizer.step()
-
-            running_loss += loss.item()
-            num_batches += 1
-
-        train_loss = running_loss / max(1, num_batches)
-
-        if val_loader is not None:
-            model.eval()
-            val_running_loss = 0.0
-            val_batches = 0
-            with torch.no_grad():
-                for batch in val_loader:
-                    inputs = batch[0].to(device)
-                    _, recon = model(inputs)
-                    val_loss = cosine_distance_loss(recon, inputs)
-                    val_running_loss += val_loss.item()
-                    val_batches += 1
-            validation_loss = val_running_loss / max(1, val_batches)
-        else:
-            validation_loss = train_loss
-
-        print(
-            f"Pretrain Epoch {epoch}: train_loss={train_loss:.6f}, val_loss={validation_loss:.6f}"
-        )
-
-        monitored_loss = validation_loss if val_loader is not None else train_loss
-        if monitored_loss + min_delta < best_loss:
-            best_loss = monitored_loss
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-
-        if epochs_without_improvement >= patience:
-            print("Pretraining converged (early stopping criterion met).")
-            break
-
-
-def extract_latent_representations(
-    model: nn.Module, data_loader: DataLoader, device: torch.device
-) -> Optional[torch.Tensor]:
-    """Runs the embedding model to collect latent vectors for the provided data."""
-
-    model.eval()
-    latents: List[torch.Tensor] = []
-    with torch.no_grad():
-        for batch in data_loader:
-            inputs = batch[0].to(device)
-            z, _ = model(inputs)
-            latents.append(z.detach().cpu())
-
-    if not latents:
-        return None
-
-    return torch.cat(latents, dim=0)
-
 JSONL_PATH = Path("/home/liangyushan/DeepECT/concat_embeddings.jsonl")
 if not JSONL_PATH.exists():
     print(f"Creating sample dataset at {JSONL_PATH}...")
@@ -197,61 +84,23 @@ if not JSONL_PATH.exists():
 
 dataset = JsonlEmbeddingDataset(JSONL_PATH)
 
-dataset_size = len(dataset)
-pretrain_size = max(1, int(dataset_size * 0.9))
-validation_size = dataset_size - pretrain_size
-generator = torch.Generator().manual_seed(42)
-pretrain_subset, validation_subset = random_split(
-    dataset, [pretrain_size, validation_size], generator=generator
-)
-
-pretrain_loader = DataLoader(
-    pretrain_subset, batch_size=256, shuffle=True, collate_fn=jsonl_collate_fn
-)
-validation_loader = None
-if validation_size > 0:
-    validation_loader = DataLoader(
-        validation_subset,
-        batch_size=256,
-        shuffle=False,
-        collate_fn=jsonl_collate_fn,
-    )
-
-dataloader = DataLoader(dataset, batch_size=256, shuffle=True, collate_fn=jsonl_collate_fn)
-
-# For prediction, we use the full dataset without shuffling to preserve order
-fulldataloader = DataLoader(dataset, batch_size=512, shuffle=False, collate_fn=jsonl_collate_fn)
-
-
 # 3. Initialize Models
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 INPUT_DIM = dataset.embedding_dim
 LATENT_DIM = 128
 print(f"INPUT_DIM={INPUT_DIM}")
 
-base_embedding_model = Autoencoder(input_dim=INPUT_DIM, latent_dim=LATENT_DIM)
-base_embedding_model = base_embedding_model.to(DEVICE)
-if torch.cuda.device_count() > 1:
-    print(f"Using {torch.cuda.device_count()} GPUs for training.")
-    embedding_model = nn.DataParallel(base_embedding_model)
-else:
-    embedding_model = base_embedding_model
+all_embeddings = np.array(dataset.embeddings, dtype=np.float32)
+umap_model = UMAP(n_components=LATENT_DIM, random_state=42)
+reduced_embeddings = umap_model.fit_transform(all_embeddings)
+dataset.embeddings = [emb.astype(float).tolist() for emb in reduced_embeddings]
+dataset.embedding_dim = LATENT_DIM
 
-print("Starting autoencoder pretraining...")
-pretrain_autoencoder(
-    embedding_model,
-    pretrain_loader,
-    device=DEVICE,
-    max_epochs=50,
-    lr=1e-3,
-    val_loader=validation_loader,
-    patience=5,
-    min_delta=1e-4,
-)
-print("Autoencoder pretraining finished.")
+dataloader = DataLoader(dataset, batch_size=256, shuffle=True, collate_fn=jsonl_collate_fn)
+fulldataloader = DataLoader(dataset, batch_size=512, shuffle=False, collate_fn=jsonl_collate_fn)
 
-dect_model = DeepECT(embedding_model=embedding_model, latent_dim=LATENT_DIM, device=DEVICE)
-initial_latents = extract_latent_representations(embedding_model, fulldataloader, DEVICE)
+dect_model = DeepECT(latent_dim=LATENT_DIM, device=DEVICE)
+initial_latents = torch.tensor(dataset.embeddings, dtype=torch.float32)
 dect_model.initialize_tree_from_latents(initial_latents)
 
 # 4. Train the DeepECT model
@@ -312,14 +161,7 @@ print(f"\nSaving model to {MODEL_PATH}...")
 dect_model.save_model(MODEL_PATH)
 
 # Create a new instance to load the model into
-new_base_model = Autoencoder(input_dim=INPUT_DIM, latent_dim=LATENT_DIM)
-new_base_model = new_base_model.to(DEVICE)
-if torch.cuda.device_count() > 1:
-    loaded_embedding_model = nn.DataParallel(new_base_model)
-else:
-    loaded_embedding_model = new_base_model
-
-loaded_dect_model = DeepECT(embedding_model=loaded_embedding_model, latent_dim=LATENT_DIM, device=DEVICE)
+loaded_dect_model = DeepECT(latent_dim=LATENT_DIM, device=DEVICE)
 
 print(f"Loading model from {MODEL_PATH}...")
 # The load_model method is not defined in the provided code snippet.

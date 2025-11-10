@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from sklearn.cluster import KMeans
 
-from typing import Union, Tuple, Callable, Iterable, Dict, List, Any
+from typing import Union, Tuple, Iterable, Dict, List, Any
 
 
 class TreeNode:
@@ -78,13 +78,11 @@ def cosine_distance_loss(input_tensor: torch.Tensor, target_tensor: torch.Tensor
 class DeepECT(nn.Module):
     """
     Deep Embedded Clustering Tree (DeepECT) model.
-    This model combines a deep embedding model (like an autoencoder) with a dynamically
-    growing and pruning binary tree structure for hierarchical clustering.
+    This variant operates directly on fixed low-dimensional embeddings produced
+    externally (e.g., via UMAP) and optimizes only the tree structure.
     """
-    def __init__(self, embedding_model: nn.Module, latent_dim: int, embedding_model_loss: Callable = cosine_distance_loss, device: torch.device = 'cpu') -> None:
+    def __init__(self, latent_dim: int, device: torch.device = 'cpu') -> None:
         super().__init__()
-        self.embedding_model = embedding_model.to(device)
-        self.embedding_model_loss = embedding_model_loss
         self.latent_dim = latent_dim
         self.device = device
 
@@ -228,7 +226,6 @@ class DeepECT(nn.Module):
         Returns:
             bool: True if the tree was grown, False otherwise.
         """
-        self.embedding_model.eval()
         any_split_successful = False
 
         with torch.no_grad():
@@ -237,10 +234,9 @@ class DeepECT(nn.Module):
             for batch in data_loader:
                 embeddings, _ = self._extract_batch(batch)
                 embeddings = embeddings.to(self.device)
-                latent_batches.append(self.embedding_model(embeddings)[0])
+                latent_batches.append(embeddings)
 
             if not latent_batches:
-                self.embedding_model.train()
                 return False
 
             all_z = torch.cat(latent_batches, dim=0)
@@ -255,7 +251,6 @@ class DeepECT(nn.Module):
                     split_candidates.append({'variance': variance, 'node': leaf, 'data': assigned_z})
 
         if not split_candidates:
-            self.embedding_model.train()
             return False
 
         split_candidates.sort(key=lambda x: x['variance'], reverse=True)
@@ -272,7 +267,6 @@ class DeepECT(nn.Module):
         num_to_split = min(num_to_split, available_slots)
         
         if num_to_split <= 0:
-            self.embedding_model.train()
             return False
 
         nodes_to_split_info = split_candidates[:num_to_split]
@@ -302,8 +296,7 @@ class DeepECT(nn.Module):
         
         if any_split_successful:
             self._update_inner_node_centers()
-            
-        self.embedding_model.train()
+
         return any_split_successful
 
     def _prune_tree(self, threshold: float = 0.1) -> bool:
@@ -348,14 +341,8 @@ class DeepECT(nn.Module):
 
         return tree_was_pruned
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        z, x_hat = self.embedding_model(x)
-
-        # Loss 1: Reconstruction Loss (L_REC)
-        # This ensures the embedding retains information from the original data.
-        loss_rec = self.embedding_model_loss(x_hat, x)
-        if isinstance(loss_rec, (Tuple, List)):
-            loss_rec, *_ = loss_rec
+    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        loss_rec = torch.tensor(0.0, device=self.device)
 
         if not self.leaf_nodes:
             return loss_rec, loss_rec, torch.tensor(0.0, device=self.device), torch.tensor(0.0, device=self.device)
@@ -421,7 +408,7 @@ class DeepECT(nn.Module):
         if num_nodes_for_dc > 0:
             loss_dc /= num_nodes_for_dc
 
-        total_loss = loss_rec + loss_nc + loss_dc
+        total_loss = loss_nc + loss_dc
 
         # Update node weights and internal centers after loss calculation
         with torch.no_grad():
@@ -458,12 +445,9 @@ class DeepECT(nn.Module):
 
         def create_optimizer(tree_params):
             if tree_params:
-                return optim.Adam([
-                    {'params': self.embedding_model.parameters()},
-                    {'params': tree_params}
-                ], lr=lr)
+                return optim.Adam(tree_params, lr=lr)
             else:
-                return optim.Adam(self.embedding_model.parameters(), lr=lr)
+                raise ValueError("Tree must have parameters to optimize.")
 
         optimizer = create_optimizer(self.get_tree_parameters())
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=lr_decay_step, gamma=lr_decay_gamma)
@@ -544,15 +528,13 @@ class DeepECT(nn.Module):
                 element of a tuple), they are returned under the key ``"idx"``
                 in the same order as ``"assignments"``.
         """
-        self.embedding_model.eval()
         with torch.no_grad():
             all_z = []
             all_indices: List[Any] = []
             for batch in tqdm(data_loader, desc="Predicting"):
                 data, metadata = self._extract_batch(batch)
                 data = data.to(self.device)
-                z, _ = self.embedding_model(data)
-                all_z.append(z)
+                all_z.append(data)
 
                 idx_values = metadata.get('idx')
                 if idx_values is not None:
@@ -574,8 +556,7 @@ class DeepECT(nn.Module):
     
     def get_state(self) -> Dict[str, Any]:
         """
-        Serializes the model's state into a dictionary for saving.
-        This includes the embedding model's state and the tree structure.
+        Serializes the tree state into a dictionary for saving.
 
         Returns:
             Dict[str, Any]: A dictionary containing the model's state.
@@ -598,17 +579,14 @@ class DeepECT(nn.Module):
             'root_id': self.root.id if self.root else None
         }
 
-        model_to_save = self.embedding_model.module if isinstance(self.embedding_model, nn.DataParallel) else self.embedding_model
-
         state = {
-            'embedding_model_state_dict': model_to_save.state_dict(),
             'tree_state': tree_state,
         }
         return state
 
     def save_model(self, path: str) -> None:
         """
-        Saves the complete model state (embedding model and tree) to a file.
+        Saves the complete model state to a file.
 
         Args:
             path (str): The path to the file where the model will be saved.
@@ -619,21 +597,12 @@ class DeepECT(nn.Module):
 
     def load_model(self, path: str) -> None:
         """
-        Loads the complete model state (embedding model and tree) from a file.
+        Loads the complete model state from a file.
 
         Args:
             path (str): The path to the file from which to load the model.
         """
         checkpoint = torch.load(path, map_location=self.device)
-
-        target_model = self.embedding_model.module if isinstance(self.embedding_model, nn.DataParallel) else self.embedding_model
-        try:
-            target_model.load_state_dict(checkpoint['embedding_model_state_dict'])
-        except RuntimeError:
-            stripped_state = {
-                k.replace('module.', ''): v for k, v in checkpoint['embedding_model_state_dict'].items()
-            }
-            target_model.load_state_dict(stripped_state)
 
         tree_state = checkpoint['tree_state']
         if tree_state.get('root_id') is None:
