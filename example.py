@@ -87,12 +87,19 @@ dataset = JsonlEmbeddingDataset(JSONL_PATH)
 # 3. Initialize Models
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 INPUT_DIM = dataset.embedding_dim
-LATENT_DIM = 128
+WHOLE_REDUCED_DIM = 256
+KEY_REDUCED_DIM = 256
+LATENT_DIM = WHOLE_REDUCED_DIM + KEY_REDUCED_DIM
 print(f"INPUT_DIM={INPUT_DIM}")
 
 all_embeddings = np.array(dataset.embeddings, dtype=np.float32)
-umap_model = UMAP(n_components=LATENT_DIM, random_state=42)
-reduced_embeddings = umap_model.fit_transform(all_embeddings)
+whole_embeddings = all_embeddings[:, :768]
+key_embeddings = all_embeddings[:, 768:1536]
+umap_whole = UMAP(n_components=WHOLE_REDUCED_DIM, random_state=42)
+reduced_whole = umap_whole.fit_transform(whole_embeddings)
+umap_key = UMAP(n_components=KEY_REDUCED_DIM, random_state=42)
+reduced_key = umap_key.fit_transform(key_embeddings)
+reduced_embeddings = np.concatenate([reduced_whole, reduced_key], axis=1)
 dataset.embeddings = [emb.astype(float).tolist() for emb in reduced_embeddings]
 dataset.embedding_dim = LATENT_DIM
 
