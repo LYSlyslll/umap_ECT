@@ -18,14 +18,14 @@ class Autoencoder(nn.Module):
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 512),
             nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(512, 128),
+            nn.Linear(512, 256),
             nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(128, latent_dim)
+            nn.Linear(256, latent_dim)
         )
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 128),
+            nn.Linear(latent_dim, 256),
             nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(128, 512),
+            nn.Linear(256, 512),
             nn.LeakyReLU(negative_slope=0.2),
             nn.Linear(512, input_dim)
         )
@@ -37,10 +37,10 @@ class Autoencoder(nn.Module):
 
 # 2. Prepare Data
 # Read embeddings from a JSONL file where each line is a JSON object with
-# fields: "idx", "phrase", and "embedding" (a list of 1536 floats).
+# fields: "idx", "phrase", and "embedding" (a list of 768、1536 floats).
 
 
-def create_sample_jsonl(path: Path, num_samples: int = 200, embedding_dim: int = 1536) -> None:
+def create_sample_jsonl(path: Path, num_samples: int = 200, embedding_dim: int = 768) -> None:
     """Creates a small synthetic JSONL dataset for demonstration purposes."""
     data, labels = make_blobs(
         n_samples=num_samples,
@@ -55,7 +55,7 @@ def create_sample_jsonl(path: Path, num_samples: int = 200, embedding_dim: int =
         for idx, (embedding, label) in enumerate(zip(data, labels)):
             record = {
                 "idx": idx,
-                "phrase": int(label),
+                "错误类型": int(label),
                 "embedding": embedding.astype(float).tolist(),
             }
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
@@ -76,7 +76,7 @@ class JsonlEmbeddingDataset(Dataset):
                     continue
                 record = json.loads(line)
                 self.indices.append(record["idx"])
-                self.error_types.append(record.get("phrase"))
+                self.error_types.append(record.get("错误类型"))
                 self.embeddings.append(record["embedding"])
                 if line_number==10000:
                     break
@@ -101,7 +101,7 @@ def jsonl_collate_fn(batch):
     return embeddings, indices, error_types
 
 
-JSONL_PATH = Path("/home/liangyushan/DeepECT/concat_embeddings.jsonl")
+JSONL_PATH = Path("/home/liangyushan/DeepECT/concept_embeddings.jsonl")
 if not JSONL_PATH.exists():
     print(f"Creating sample dataset at {JSONL_PATH}...")
     create_sample_jsonl(JSONL_PATH)
@@ -117,7 +117,7 @@ fulldataloader = DataLoader(dataset, batch_size=512, shuffle=False, collate_fn=j
 # 3. Initialize Models
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 INPUT_DIM = dataset.embedding_dim
-LATENT_DIM = 64
+LATENT_DIM = 128
 print(f"INPUT_DIM={INPUT_DIM}")
 
 base_embedding_model = Autoencoder(input_dim=INPUT_DIM, latent_dim=LATENT_DIM)
@@ -137,9 +137,9 @@ training_history = dect_model.train(
     iterations=500,
     lr=1e-3,
     max_leaves=3000,          # Stop growing when the tree has 10 leaves
-    split_interval=5,     # Check for splits every 200 iterations
-    pruning_threshold=0.005, # Prune nodes with weight < 0.05
-    split_count_per_growth=3, # Split the 2 best candidate nodes each time
+    split_interval=2,     # Check for splits every 200 iterations
+    pruning_threshold=0.05, # Prune nodes with weight < 0.05
+    split_count_per_growth=5, # Split the 2 best candidate nodes each time
     lr_decay_step=100,
     lr_decay_gamma=0.95
 )
