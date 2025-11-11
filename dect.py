@@ -109,6 +109,36 @@ class DeepECT(nn.Module):
                 params.append(node.center)
         return params
 
+    def initialize_tree_from_latents(self, latent_vectors: torch.Tensor) -> None:
+        """Initializes the root center using pre-computed latent representations.
+
+        Args:
+            latent_vectors (torch.Tensor): Latent representations obtained from
+                the pre-trained embedding model. Expected shape is
+                ``(num_samples, latent_dim)``.
+        """
+        if latent_vectors is None:
+            return
+
+        if latent_vectors.ndim != 2:
+            raise ValueError("latent_vectors must be a 2D tensor of shape (N, latent_dim).")
+
+        if latent_vectors.size(1) != self.latent_dim:
+            raise ValueError(
+                f"latent_vectors have dimension {latent_vectors.size(1)}, expected {self.latent_dim}."
+            )
+
+        if latent_vectors.numel() == 0:
+            return
+
+        latent_vectors = latent_vectors.to(self.device)
+        root_center = latent_vectors.mean(dim=0)
+        self.root.center.data.copy_(root_center)
+        self.root.weight = torch.tensor(1.0, device=self.device)
+        self.root.is_leaf = True
+        self.leaf_nodes = [self.root]
+        self.nodes = {self.root.id: self.root}
+
     def _extract_batch(self, batch: Any) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
         Normalizes a batch coming from a DataLoader into embeddings and metadata.
