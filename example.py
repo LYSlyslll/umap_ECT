@@ -2,46 +2,24 @@ import json
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 from sklearn.datasets import make_blobs
+from umap import UMAP
 import matplotlib.pyplot as plt
 
 # Assuming dect.py is in the same directory
 from dect import DeepECT
-
-# 1. Define an embedding model (e.g., a simple Autoencoder)
-class Autoencoder(nn.Module):
-    def __init__(self, input_dim, latent_dim):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 512),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(512, 256),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(256, latent_dim)
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 256),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(256, 512),
-            nn.LeakyReLU(negative_slope=0.2),
-            nn.Linear(512, input_dim)
-        )
-
-    def forward(self, x):
-        z = self.encoder(x)
-        x_hat = self.decoder(z)
-        return z, x_hat
 
 # 2. Prepare Data
 # Read embeddings from a JSONL file where each line is a JSON object with
 # fields: "idx", "phrase", and "embedding" (a list of 768、1536 floats).
 
 
-def create_sample_jsonl(path: Path, num_samples: int = 200, embedding_dim: int = 768) -> None:
+def create_sample_jsonl(path: Path, num_samples: int = 200, embedding_dim: int = 1536) -> None:
     """Creates a small synthetic JSONL dataset for demonstration purposes."""
     data, labels = make_blobs(
         n_samples=num_samples,
@@ -56,7 +34,7 @@ def create_sample_jsonl(path: Path, num_samples: int = 200, embedding_dim: int =
         for idx, (embedding, label) in enumerate(zip(data, labels)):
             record = {
                 "idx": idx,
-                "错误类型": int(label),
+                "phrase": int(label),
                 "embedding": embedding.astype(float).tolist(),
             }
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
@@ -77,9 +55,9 @@ class JsonlEmbeddingDataset(Dataset):
                     continue
                 record = json.loads(line)
                 self.indices.append(record["idx"])
-                self.error_types.append(record.get("错误类型"))
+                self.error_types.append(record.get("phrase"))
                 self.embeddings.append(record["embedding"])
-                if line_number==10000:
+                if line_number==50000:
                     break
 
         if not self.embeddings:
@@ -230,16 +208,24 @@ fulldataloader = DataLoader(dataset, batch_size=512, shuffle=False, collate_fn=j
 # 3. Initialize Models
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 INPUT_DIM = dataset.embedding_dim
-LATENT_DIM = 128
+WHOLE_REDUCED_DIM = 256
+KEY_REDUCED_DIM = 256
+LATENT_DIM = WHOLE_REDUCED_DIM + KEY_REDUCED_DIM
 print(f"INPUT_DIM={INPUT_DIM}")
 
-base_embedding_model = Autoencoder(input_dim=INPUT_DIM, latent_dim=LATENT_DIM)
-base_embedding_model = base_embedding_model.to(DEVICE)
-if torch.cuda.device_count() > 1:
-    print(f"Using {torch.cuda.device_count()} GPUs for training.")
-    embedding_model = nn.DataParallel(base_embedding_model)
-else:
-    embedding_model = base_embedding_model
+all_embeddings = np.array(dataset.embeddings, dtype=np.float32)
+whole_embeddings = all_embeddings[:, :768]
+key_embeddings = all_embeddings[:, 768:1536]
+umap_whole = UMAP(n_components=WHOLE_REDUCED_DIM, random_state=42)
+reduced_whole = umap_whole.fit_transform(whole_embeddings)
+umap_key = UMAP(n_components=KEY_REDUCED_DIM, random_state=42)
+reduced_key = umap_key.fit_transform(key_embeddings)
+reduced_embeddings = np.concatenate([reduced_whole, reduced_key], axis=1)
+dataset.embeddings = [emb.astype(float).tolist() for emb in reduced_embeddings]
+dataset.embedding_dim = LATENT_DIM
+
+dataloader = DataLoader(dataset, batch_size=256, shuffle=True, collate_fn=jsonl_collate_fn)
+fulldataloader = DataLoader(dataset, batch_size=512, shuffle=False, collate_fn=jsonl_collate_fn)
 
 print("Starting autoencoder pretraining...")
 pretrain_autoencoder(
@@ -268,7 +254,7 @@ training_history = dect_model.train(
     max_leaves=3000,          # Stop growing when the tree has 10 leaves
     split_interval=2,     # Check for splits every 200 iterations
     pruning_threshold=0.05, # Prune nodes with weight < 0.05
-    split_count_per_growth=5, # Split the 2 best candidate nodes each time
+    split_count_per_growth=3, # Split the 2 best candidate nodes each time
     lr_decay_step=100,
     lr_decay_gamma=0.95
 )
@@ -317,14 +303,7 @@ print(f"\nSaving model to {MODEL_PATH}...")
 dect_model.save_model(MODEL_PATH)
 
 # Create a new instance to load the model into
-new_base_model = Autoencoder(input_dim=INPUT_DIM, latent_dim=LATENT_DIM)
-new_base_model = new_base_model.to(DEVICE)
-if torch.cuda.device_count() > 1:
-    loaded_embedding_model = nn.DataParallel(new_base_model)
-else:
-    loaded_embedding_model = new_base_model
-
-loaded_dect_model = DeepECT(embedding_model=loaded_embedding_model, latent_dim=LATENT_DIM, device=DEVICE)
+loaded_dect_model = DeepECT(latent_dim=LATENT_DIM, device=DEVICE)
 
 print(f"Loading model from {MODEL_PATH}...")
 # The load_model method is not defined in the provided code snippet.
