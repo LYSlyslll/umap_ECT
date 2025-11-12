@@ -103,7 +103,7 @@ reduced_embeddings = np.concatenate([reduced_whole, reduced_key], axis=1)
 dataset.embeddings = [emb.astype(float).tolist() for emb in reduced_embeddings]
 dataset.embedding_dim = LATENT_DIM
 
-dataloader = DataLoader(dataset, batch_size=256, shuffle=True, collate_fn=jsonl_collate_fn)
+dataloader = DataLoader(dataset, batch_size=512, shuffle=True, collate_fn=jsonl_collate_fn)
 fulldataloader = DataLoader(dataset, batch_size=512, shuffle=False, collate_fn=jsonl_collate_fn)
 
 dect_model = DeepECT(latent_dim=LATENT_DIM, device=DEVICE)
@@ -114,12 +114,12 @@ dect_model.initialize_tree_from_latents(initial_latents)
 print("Starting training...")
 training_history = dect_model.train(
     dataloader=dataloader,
-    iterations=500,
+    iterations=6000,
     lr=1e-3,
-    max_leaves=3500,          # Stop growing when the tree has 10 leaves
-    split_interval=2,     # Check for splits every 200 iterations
-    pruning_threshold=0.005, # Prune nodes with weight < 0.05
-    split_count_per_growth=10, # Split the 2 best candidate nodes each time
+    max_leaves=3000,          # Allow up to 3000 leaves during training
+    split_interval=10,        # Convergence phase split interval
+    pruning_threshold=0.02,   # Gentle pruning threshold for convergence
+    split_count_per_growth=5, # Convergence phase splits per growth
     lr_decay_step=100,
     lr_decay_gamma=0.95
 )

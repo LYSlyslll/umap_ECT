@@ -414,7 +414,7 @@ class DeepECT(nn.Module):
         with torch.no_grad():
             for i, leaf in enumerate(self.leaf_nodes):
                 num_assigned = (leaf_assignments == i).sum().float() / len(leaf_assignments)
-                leaf.update_weight(num_assigned)
+                leaf.update_weight(num_assigned, alpha=weight_alpha)
             self._update_inner_node_centers()
 
         return total_loss, loss_rec, loss_nc, loss_dc
@@ -430,9 +430,9 @@ class DeepECT(nn.Module):
             iterations (int): The total number of training iterations.
             lr (float): The initial learning rate for the optimizer.
             max_leaves (int): The maximum number of leaf nodes in the tree.
-            split_interval (int): The number of iterations between tree growing procedures.
-            pruning_threshold (float): The weight threshold for pruning dead nodes.
-            split_count_per_growth (int or float): The number or fraction of nodes to split during each growth phase.
+            split_interval (int): Convergence-phase iterations between tree growing procedures.
+            pruning_threshold (float): Convergence-phase weight threshold for pruning dead nodes.
+            split_count_per_growth (int or float): Convergence-phase number or fraction of nodes to split per growth step.
             lr_decay_step (int): Number of iterations between StepLR updates.
             lr_decay_gamma (float): Multiplicative factor of learning rate decay.
 
@@ -455,6 +455,12 @@ class DeepECT(nn.Module):
         data_iterator = iter(dataloader)
         iteration = 0
 
+        expansion_phase_ratio = 0.6
+        expansion_phase_iterations = max(1, int(iterations * expansion_phase_ratio))
+        aggressive_split_interval = 1
+        aggressive_split_fraction = 0.25
+        weight_alpha = 0.05
+
         loss_history: Dict[str, List[float]] = {
             'total': [],
             'reconstruction': [],
@@ -474,13 +480,18 @@ class DeepECT(nn.Module):
             data = data.to(self.device)
             structure_changed = False
 
-            # Prune the tree to remove inactive nodes
-            if self._prune_tree(threshold=pruning_threshold):
-                structure_changed = True
+            in_expansion_phase = iteration < expansion_phase_iterations
+            current_split_interval = aggressive_split_interval if in_expansion_phase else max(1, split_interval)
+            current_split_count = aggressive_split_fraction if in_expansion_phase else split_count_per_growth
+
+            # Prune the tree to remove inactive nodes (disabled during expansion phase)
+            if not in_expansion_phase:
+                if self._prune_tree(threshold=pruning_threshold):
+                    structure_changed = True
 
             # Grow the tree by splitting high-variance nodes
-            if iteration > 0 and iteration % split_interval == 0 and len(self.leaf_nodes) < max_leaves:
-                if self._grow_tree(dataloader, max_leaves=max_leaves, split_count=split_count_per_growth):
+            if iteration > 0 and iteration % current_split_interval == 0 and len(self.leaf_nodes) < max_leaves:
+                if self._grow_tree(dataloader, max_leaves=max_leaves, split_count=current_split_count):
                     structure_changed = True
 
             # If tree structure changed, we need a new optimizer for the new set of parameters
